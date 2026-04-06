@@ -1,0 +1,54 @@
+scraper:
+  # bdsmlr.com connection settings
+  base_url: "https://bdsmlr.com"
+  request_delay: 2  # seconds between requests
+  timeout: 10  # request timeout in seconds
+  verify_ssl: true   # set false to disable SSL cert validation (dev only)
+  
+  # Proxy configuration
+  proxy:
+    enabled: false
+    url: "http://proxy-server:port"
+    # Optional: set to true if proxy requires authentication
+    # auth: "username:password"
+
+summarizer:
+  # Ollama model settings
+  ollama_url: "http://localhost:11434"
+  ollama_model: "gemma-3-4b-it-uncensored-v2-gguf:q5_k_m"
+  # Timeout for Ollama requests (seconds)
+  timeout: 120
+
+output:
+  # Essay generation settings
+  essay_word_count: 750  # 500-1000 range recommended
+  essay_file: "output/essay.txt"
+  
+  # Personality traits inference settings
+  traits_file: "output/traits.json"
+  traits_confidence_threshold: 50  # Minimum confidence (0-100) to include trait
+
+traits:
+  # Total number of traits to identify
+  total_count: 20
+  
+  # Base psychological traits (10 fixed)
+  base_traits:
+    - "Dominance Orientation"
+    - "Submission Orientation"
+    - "Power Dynamics Awareness"
+    - "Risk Tolerance"
+    - "Emotional Expressiveness"
+    - "Boundary Setting"
+    - "Vulnerability"
+    - "Authenticity"
+    - "Community Engagement"
+    - "Self-Reflection"
+  
+  # Custom traits (add up to 10+ here)
+  custom_traits: []
+
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  scraper_log: "logs/scraper.log"
+  ai_engine_log: "logs/ai_engine.log"

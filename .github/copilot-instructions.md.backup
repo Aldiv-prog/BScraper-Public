@@ -1,0 +1,190 @@
+# BScraper - Blog Content Extraction & AI Analysis Backend
+
+## Project Overview
+BScraper is a Python-based backend for extracting blog content from bdsmlr.com and generating AI-powered psychological insights. **MVP scope**: Scraping text posts + tags → Summarization → Personality trait inference with evidence. This is the **backend only**; the frontend (web-based quiz) is a separate repository.
+
+## Architecture: Three-Phase Pipeline
+```
+Phase 1: SCRAPER        Phase 2: SUMMARIZER         Phase 3: TRAIT INFERENCE
+Blog content    →   Raw text + tags    →   500-1000 word essay    →   ~20 traits with evidence
+(authenticated)     (deduplicated)       (via Ollama)               (JSON with quotes)
+```
+
+**Phase 1 Features:**
+- **Interactive Session Control**: User can pause/resume scraping at any point
+- **Infinite Scroll Support**: Handles paginated posts that load on scroll
+- **Session Persistence**: Saves scraping progress to `output/scraping_session.json`
+- **Content Filtering**: 
+  - `text_clear`: Explicit relationship rules → used for trait inference
+  - `image_dependent`: Short posts dependent on images → skipped
+  - `quiz_question`: Tagged with "quiz" → saved for Phase 2
+- **Graceful Degradation**: Stopping scraping doesn't terminate the app; offers to continue analysis
+
+**Key Separation of Concerns**:
+- `scraper/` - Handles bdsmlr.com authentication, HTTP requests (with proxy), HTML parsing
+- `scraper/models.py` - BlogPost and ScrapingSession dataclasses with persistence
+- `processor/` - Text cleaning, deduplication, aggregation, content filtering
+- `ai_engine/` - Ollama integration, prompt engineering, trait extraction
+- `config/` - YAML-based configuration (credentials prompted at runtime)
+- `output/` - Generated essay (Markdown) + traits (JSON) + session state
+
+## Configuration (config.yaml)
+```yaml
+scraper:
+  base_url: "https://bdsmlr.com"
+  blog_name: "education.bdsmlr.com"  # Can differ from login username
+  request_delay: 2  # seconds between requests
+  timeout: 30
+  verify_ssl: false  # SSL verification toggle
+  interactive_scraping: true  # Enable pause/resume UI
+  
+  proxy:
+    enabled: true
+    url: "http://proxy-server:port"
+
+summarizer:
+  ollama_model: "gemma-3-4b-it-uncensored-v2-gguf:q5_k_m"
+  ollama_url: "http://localhost:11434"
+  essay_word_count: 750  # configurable 500-1000
+
+traits:
+  total_count: 20
+  base_traits:  # fixed psychological traits (10)
+    - "Dominance Orientation"
+    - "Submission Orientation"
+    # ... 8 more
+  custom_traits: []  # user can add 10+ custom traits
+  
+output:
+  essay_format: "markdown"
+  essay_file: "output/essay.md"
+  traits_file: "output/traits.json"
+```
+
+## Development Workflow
+
+### Setup
+```bash
+python -m venv venv
+venv\Scripts\activate  # Windows PowerShell
+pip install -r requirements.txt
+```
+
+### Run MVP Pipeline
+```bash
+python main.py
+# Prompts: "Enter bdsmlr.com username: " → "Enter password: "
+# Outputs: output/essay.md + output/traits.json
+```
+
+### Debug
+- Use `--verbose` flag for detailed logging
+- Check `logs/scraper.log` for network/parsing issues
+- Check `logs/ai_engine.log` for Ollama communication
+
+## Key Patterns
+
+### 1. Ollama Integration (ai_engine/)
+- **Local-only**: No external API calls; Ollama runs on `localhost:11434`
+- **Prompt Structure**: 
+  ```python
+  # Phase 1: Summarization prompt (include raw blog content)
+  prompt = f"""Analyze this blog content and write a personal essay (750 words):
+  {raw_blog_content}
+  
+  The essay should reflect the author's worldview, values, and personality."""
+  
+  # Phase 2: Trait inference prompt (work from summarized essay)
+  prompt = f"""Identify 20 psychological traits from this essay:
+  {essay_content}
+  
+  For EACH trait, provide:
+  - Trait name
+  - Confidence (0-100)
+  - Direct evidence/quote from essay"""
+  ```
+- **Response Parsing**: Expect structured JSON output; validate with Pydantic models
+
+### 2. Scraper Authentication
+- **Runtime Prompts**: Use `getpass.getpass()` for password input (not echoed to terminal)
+- **Session Management**: Maintain `requests.Session()` with cookies for authenticated requests
+- **CSRF Handling**: Extract CSRF tokens from login forms using regex patterns
+- **Browser Headers**: Include realistic User-Agent and Accept headers to avoid blocking
+- **Proxy Rotation**: If `scraper.proxy.enabled=true`, apply proxy to ALL requests
+
+### 4. HTML Parsing Patterns (bdsmlr_scraper.py)
+- **Multiple Selectors**: Try different CSS selectors for post containers (`article.post`, `div.entry`, etc.)
+- **Flexible Content Extraction**: Handle various blog layouts with fallback selectors
+- **Tag Parsing**: Extract tags from links with `#` prefix removal
+- **Date Parsing**: Support multiple datetime formats (ISO, US, European)
+- **URL Construction**: Handle pagination (`/blog/username` for page 1, `/blog/username/page/2` for others)
+
+### 3. Content Deduplication
+- Posts may repeat or have minor variations; deduplicate by content hash before summarization
+- Store hashes in temporary JSON file during scraping
+
+## Trait Inference Details
+
+### Output Format (traits.json)
+```json
+{
+  "traits": [
+    {
+      "name": "Dominance Orientation",
+      "confidence": 87,
+      "evidence": "The author frequently discusses leadership roles and decision-making authority",
+      "quote": "\"I believe in taking control and guiding others toward my vision\""
+    }
+  ],
+  "summary_reference": "essay.md",
+  "generated_at": "2026-03-24T14:32:00Z"
+}
+```
+
+### Prompting Strategy for Best Results
+1. **First Pass**: Give Ollama the full essay + trait descriptions
+2. **Evidence Extraction**: Ask Ollama to justify EACH trait with specific quotes
+3. **Confidence Scoring**: Include confidence as a percentage; discard traits below 50%
+4. **Review Loop**: Output goes to user for manual review before quiz generation phase
+
+## Integration Points
+- **bdsmlr.com**: Requires valid username/password (private blog access)
+- **Ollama**: Must be running locally (`ollama serve` before running this app)
+- **Proxy Server**: Optional; set in config if needed for network isolation
+
+## Common Issues & Solutions
+- **Ollama Timeout**: Increase timeout in config if model is slow
+- **HTML Structure Changes**: If scraper breaks, examine bdsmlr.com HTML structure and update CSS selectors in `scraper/parser.py`
+- **Empty Trait Output**: Check that Ollama response is valid JSON; add stricter prompt formatting if needed
+- **Deduplication Misses**: Increase similarity threshold in `processor/deduplicator.py` if duplicates remain
+
+## File Organization
+```
+BScraper-Backend/
+├── config.yaml              # User configuration (ignored in git)
+├── config.example.yaml      # Template for users
+├── main.py                  # Entry point
+├── scraper/
+│   ├── bdsmlr_scraper.py    # Authentication + HTML parsing
+│   ├── session_manager.py   # Cookie/session handling
+│   └── models.py            # Post dataclass
+├── processor/
+│   ├── deduplicator.py      # Hash-based dedup
+│   └── aggregator.py        # Combine posts into raw content
+├── ai_engine/
+│   ├── ollama_client.py     # Ollama API wrapper
+│   ├── summarizer.py        # Essay generation
+│   └── trait_extractor.py   # Trait inference with evidence
+├── output/
+│   ├── essay.md             # Generated
+│   └── traits.json          # Generated
+└── logs/
+    ├── scraper.log
+    └── ai_engine.log
+```
+
+## Conventions
+- **Code Style**: PEP 8 + type hints on all functions
+- **Error Handling**: Custom exceptions (`ScrapingError`, `OllamaError`, `ConfigError`)
+- **Logging**: Structured JSON logs; INFO for milestones, WARNING for retries, ERROR for failures
+- **Secrets**: Never commit credentials; prompt at runtime or use environment variables
