@@ -1,6 +1,7 @@
 """Data models for scraper."""
 
 import json
+import uuid
 from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime
@@ -130,24 +131,30 @@ class ScrapingSession:
 
 @dataclass
 class CompleteAnalysisSession:
-    """Represents a complete analysis session with all pipeline results."""
+    """Complete analysis session including scraping data and AI analysis results."""
     
-    session_id: str
+    # Core session info
+    session_id: str  # UUID for unique identification
     blog_name: str
     username: str
+    
+    # Scraping data
     scraping_session: ScrapingSession
     aggregated_content: AggregatedBlogContent
-    quiz_questions: List[dict]
+    quiz_questions: List[BlogPost]
+    
+    # Analysis results
     essay: str
-    traits: List[dict]
-    analysis_metadata: dict
+    traits: List[dict]  # Trait analysis results
+    analysis_metadata: dict  # Model versions, timestamps, etc.
+    
+    # Archival metadata
     created_at: datetime
     last_modified: datetime
     version: str = "1.0"
-    tags: List[str] = None
+    tags: List[str] = None  # User-defined tags for organization
     
     def __post_init__(self):
-        """Initialize tags if not provided."""
         if self.tags is None:
             self.tags = []
     
@@ -161,21 +168,17 @@ class CompleteAnalysisSession:
             'aggregated_content': {
                 'total_posts': self.aggregated_content.total_posts,
                 'raw_text': self.aggregated_content.raw_text,
-                'tags': self.aggregated_content.tags,
-                'unique_tags': list(self.aggregated_content.unique_tags),
-                'numeric_levels': self.aggregated_content.numeric_levels,
-                'behavior_tags': self.aggregated_content.behavior_tags,
-                'context_tags': self.aggregated_content.context_tags,
-                'trait_filter_map': self.aggregated_content.trait_filter_map,
+                'tags': list(self.aggregated_content.tags),
+                'unique_tags': list(self.aggregated_content.unique_tags)
             },
-            'quiz_questions': self.quiz_questions,
+            'quiz_questions': [q.to_dict() for q in self.quiz_questions],
             'essay': self.essay,
             'traits': self.traits,
             'analysis_metadata': self.analysis_metadata,
             'created_at': self.created_at.isoformat(),
             'last_modified': self.last_modified.isoformat(),
             'version': self.version,
-            'tags': self.tags,
+            'tags': self.tags
         }
     
     @staticmethod
@@ -189,52 +192,56 @@ class CompleteAnalysisSession:
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             
-            # Reconstruct ScrapingSession
-            scraping_data = data['scraping_session']
+            # Reconstruct objects from dict data
             scraping_session = ScrapingSession(
-                blog_name=scraping_data['blog_name'],
-                username=scraping_data['username'],
-                posts_scraped=scraping_data['posts_scraped'],
-                last_post_id=scraping_data.get('last_post_id'),
-                current_page=scraping_data.get('current_page', 1),
-                total_scroll_depth=scraping_data.get('total_scroll_depth', 0),
-                is_complete=scraping_data.get('is_complete', False),
-                created_at=datetime.fromisoformat(scraping_data['created_at']) if scraping_data.get('created_at') else None,
-                last_updated=datetime.fromisoformat(scraping_data['last_updated']) if scraping_data.get('last_updated') else None,
+                blog_name=data['scraping_session']['blog_name'],
+                username=data['scraping_session']['username'],
+                posts_scraped=data['scraping_session']['posts_scraped'],
+                last_post_id=data['scraping_session'].get('last_post_id'),
+                current_page=data['scraping_session'].get('current_page', 1),
+                total_scroll_depth=data['scraping_session'].get('total_scroll_depth', 0),
+                is_complete=data['scraping_session'].get('is_complete', False),
+                created_at=datetime.fromisoformat(data['scraping_session']['created_at']) if data['scraping_session'].get('created_at') else None,
+                last_updated=datetime.fromisoformat(data['scraping_session']['last_updated']) if data['scraping_session'].get('last_updated') else None,
             )
             
-            # Reconstruct AggregatedBlogContent
-            agg_data = data['aggregated_content']
             aggregated_content = AggregatedBlogContent(
-                total_posts=agg_data['total_posts'],
-                raw_text=agg_data['raw_text'],
-                tags=agg_data['tags'],
-                unique_tags=set(agg_data.get('unique_tags', [])),
-                numeric_levels=agg_data.get('numeric_levels', {}),
-                behavior_tags=agg_data.get('behavior_tags', []),
-                context_tags=agg_data.get('context_tags', []),
-                trait_filter_map=agg_data.get('trait_filter_map', {}),
+                total_posts=data['aggregated_content']['total_posts'],
+                raw_text=data['aggregated_content']['raw_text'],
+                tags=data['aggregated_content']['tags'],
+                unique_tags=set(data['aggregated_content']['unique_tags'])
             )
             
-            # Create CompleteAnalysisSession
+            quiz_questions = []
+            for q_dict in data.get('quiz_questions', []):
+                quiz_questions.append(BlogPost(
+                    post_id=q_dict['post_id'],
+                    title=q_dict.get('title'),
+                    content=q_dict.get('content', ''),
+                    tags=q_dict.get('tags', []),
+                    created_at=datetime.fromisoformat(q_dict['created_at']) if q_dict.get('created_at') else None,
+                    url=q_dict.get('url'),
+                    content_type=q_dict.get('content_type', 'unknown')
+                ))
+            
             session = CompleteAnalysisSession(
                 session_id=data['session_id'],
                 blog_name=data['blog_name'],
                 username=data['username'],
                 scraping_session=scraping_session,
                 aggregated_content=aggregated_content,
-                quiz_questions=data.get('quiz_questions', []),
-                essay=data.get('essay', ''),
-                traits=data.get('traits', []),
-                analysis_metadata=data.get('analysis_metadata', {}),
+                quiz_questions=quiz_questions,
+                essay=data['essay'],
+                traits=data['traits'],
+                analysis_metadata=data['analysis_metadata'],
                 created_at=datetime.fromisoformat(data['created_at']),
                 last_modified=datetime.fromisoformat(data['last_modified']),
                 version=data.get('version', '1.0'),
-                tags=data.get('tags', []),
+                tags=data.get('tags', [])
             )
             return session
         except Exception as e:
-            print(f"Failed to load analysis session: {e}")
+            print(f"Failed to load complete analysis session: {e}")
             return None
     
     def save_to_file(self, filepath: str) -> None:

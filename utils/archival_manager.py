@@ -72,6 +72,7 @@ class ArchivalManager:
             except Exception as e:
                 logger.warning(f"Failed to load archive {archive_file}: {e}")
         
+        # Sort by creation date, newest first
         sessions.sort(key=lambda x: x['created_at'], reverse=True)
         return sessions
     
@@ -102,6 +103,7 @@ class ArchivalManager:
             return None
         
         try:
+            # Quick read to get basic metadata without full deserialization
             import json
             with open(archive_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)

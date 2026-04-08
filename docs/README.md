@@ -37,6 +37,20 @@ python main.py
 # Outputs: essay.md and traits.json
 ```
 
+### Session Backup and Archive Commands
+```bash
+python main.py --save-session-backup
+python main.py --list-session-backups
+python main.py --load-session-backup
+python main.py --list-archives
+python main.py --load-archive
+```
+- `--save-session-backup`: Save the current `output/scraping_session.json` into `archives/session_backups/`.
+- `--list-session-backups`: List all saved scraping session backup files.
+- `--load-session-backup`: Interactively load a saved scraping session backup.
+- `--list-archives`: List archived complete analysis sessions.
+- `--load-archive`: Load and inspect a saved complete analysis archive.
+
 ### Test Components
 ```bash
 python test_components.py
