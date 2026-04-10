@@ -696,7 +696,7 @@ class BdsmlrScraper:
         # Check for common blog page indicators and generic content markers
         blog_indicators = [
             soup.find('div', class_=re.compile(r'blog|posts|content')),
-            soup.find('article', class_=re.compile(r'post')),
+            soup.find('article', class_=re.compile(r'post|entry')),
             soup.find_all('h2', class_=re.compile(r'post-title|title')),
             soup.find('div', id=re.compile(r'blog|posts')),
         ]
@@ -879,7 +879,7 @@ class BdsmlrScraper:
             created_at = self._extract_date(post_elem)
             
             # Classify content type
-            content_type = self._classify_content_type(content, tags)
+            content_type = self._classify_content_type(post_elem, content, tags)
             
             logger.debug(f"Post {post_id} classified as {content_type}: '{content[:100]}...' (tags: {tags})")
             
@@ -1027,36 +1027,117 @@ class BdsmlrScraper:
         
         return None
     
-    def _classify_content_type(self, content: str, tags: List[str]) -> str:
-        """
-        Classify the type of post content for filtering.
-        
+    def _classify_content_type(self, post_elem, content: str, tags: List[str]) -> str:
+        """Classify the type of post content for filtering.
+
+        This dispatcher understands MassEditor-style posts (div.postitem with
+        image+caption or textcontent blocks) and falls back to a generic
+        text-based classifier for normal blog/sideblog layouts.
+
         Args:
-            content: Post content text
-            tags: Post tags
-        
+            post_elem: BeautifulSoup element representing the post
+            content: Post content text extracted for this post
+            tags: Post tags as scraped from the HTML
+
         Returns:
             Content type: "text_clear", "image_dependent", "quiz_question", "unknown"
         """
-        # Check for quiz-tagged posts first
-        if any(tag.lower() == "quiz" for tag in tags):
+        # Normalize tags once
+        tags_lower = [t.lower() for t in tags]
+
+        # Quiz posts are always treated as quiz questions regardless of structure
+        if "quiz" in tags_lower:
             return "quiz_question"
-        
+
+        # MassEditor / dashboard style posts use div.postitem wrappers
+        classes = post_elem.get('class') or []
+        if any(cls == "postitem" for cls in classes):
+            return self._classify_masseditor_content_type(post_elem, content, tags_lower)
+
+        # Fallback to generic blog/sideblog classifier
+        return self._classify_generic_content_type(content, tags_lower)
+
+    def _classify_masseditor_content_type(self, post_elem, content: str, tags_lower: List[str]) -> str:
+        """Classify content type for MassEditor-style posts.
+
+        Uses structural signals from the MassEditor HTML:
+        - div.textcontent for pure text posts
+        - div.imagecontent / div.image_content and div.videohold for media
+        - div.singlecommentline for captions
+
+        Returns "text_clear" when the text alone conveys meaning, and
+        "image_dependent" when the post is effectively just media with a
+        minimal or missing caption.
+        """
+        # Heuristic thresholds tuned for typical post lengths
+        STORY_MIN_CHARS = 80
+        CAPTION_STRONG_MIN_CHARS = 40
+
+        # Extract story text from dedicated textcontent blocks
+        story_elem = post_elem.find('div', class_='textcontent')
+        story_text = ""
+        if story_elem:
+            for script in story_elem.find_all(['script', 'style']):
+                script.decompose()
+            story_text = story_elem.get_text(' ', strip=True)
+
+        # Extract caption text from singlecommentline
+        caption_elem = post_elem.find('div', class_='singlecommentline')
+        caption_text = ""
+        if caption_elem:
+            for script in caption_elem.find_all(['script', 'style']):
+                script.decompose()
+            caption_text = caption_elem.get_text(' ', strip=True)
+            if caption_text.strip().lower() == "no caption":
+                caption_text = ""
+
+        # Detect media presence
+        has_image = bool(post_elem.select_one('div.imagecontent img.oneimg, div.image_content img.oneimg'))
+        has_video = bool(post_elem.select_one('div.videohold img'))
+
+        story_len = len(story_text or "")
+        caption_len = len(caption_text or "")
+
+        # 1) Long-form text posts are always text_clear
+        if story_len >= STORY_MIN_CHARS:
+            return "text_clear"
+
+        # 2) Media posts: rely on caption strength
+        if has_image or has_video:
+            if caption_len == 0:
+                return "image_dependent"
+            if caption_len < CAPTION_STRONG_MIN_CHARS:
+                return "image_dependent"
+            # Caption is substantial enough to stand on its own
+            return "text_clear"
+
+        # 3) Shorter text-only posts without media
+        if story_len > 0:
+            return "text_clear"
+
+        # 4) Fallback to generic classifier if structure is unexpected
+        return self._classify_generic_content_type(content, tags_lower)
+
+    def _classify_generic_content_type(self, content: str, tags_lower: List[str]) -> str:
+        """Generic text-based classifier for non-MassEditor posts.
+
+        This preserves the previous behavior for normal blog/sideblog layouts,
+        using only the extracted text content and tags.
+        """
         # Check content length and substance
         content_length = len(content.strip())
-        
+
         # Very short content likely depends on images
         if content_length < 20:
             return "image_dependent"
-        
+
         # Check for substantial text content with clear meaning
-        # Look for complete sentences, specific expectations, or behavioral rules
         sentences = [s.strip() for s in content.split('.') if s.strip()]
-        
+
         # Must have at least 1 complete sentence
         if len(sentences) < 1:
             return "image_dependent"
-        
+
         # Check for attitude/behavior/relationship keywords that indicate clear expectations
         relationship_keywords = [
             'should', 'must', 'expect', 'want', 'need', 'prefer', 'like', 'dislike',
@@ -1067,24 +1148,24 @@ class BdsmlrScraper:
             'understanding', 'patient', 'compassionate', 'intelligent', 'funny',
             'ambitious', 'motivated', 'driven', 'successful', 'confident', 'independent'
         ]
-        
+
         content_lower = content.lower()
         keyword_count = sum(1 for keyword in relationship_keywords if keyword in content_lower)
-        
+
         # If we have enough keywords, it's likely text_clear (even if shorter)
         if keyword_count >= 2:
             return "text_clear"
-        
+
         # Check for explicit rules or expectations
         rule_indicators = ['rule', 'expectation', 'requirement', 'standard', 'criteria', 'dealbreaker']
         if any(indicator in content_lower for indicator in rule_indicators):
             return "text_clear"
-        
+
         # Check for phrases that indicate personal preferences/requirements
         preference_indicators = ['i want', 'i need', 'i expect', 'i prefer', 'i value', 'i appreciate']
         if any(indicator in content_lower for indicator in preference_indicators):
             return "text_clear"
-        
+
         # Default to image_dependent if unclear
         return "image_dependent"
     
