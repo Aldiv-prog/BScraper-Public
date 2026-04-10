@@ -23,7 +23,7 @@ class BdsmlrScraper:
         self.base_url = session_manager.base_url
         self.session_file = session_file
     
-    def scrape_blog_interactive(self, blog_name: str, username: str, auto_resume: bool = False) -> Tuple[List[BlogPost], ScrapingSession]:
+    def scrape_blog_interactive(self, blog_name: str, username: str, auto_resume: bool = False, scrape_mode: str = "blog") -> Tuple[List[BlogPost], ScrapingSession]:
         """
         Scrape blog with interactive control and session management.
         
@@ -31,6 +31,7 @@ class BdsmlrScraper:
             blog_name: Blog name/domain to scrape
             username: Username for session tracking
             auto_resume: If True, automatically resume a saved session without prompts
+            scrape_mode: "blog" for normal blog view, "massedit" for MassEditor-based scraping
         
         Returns:
             Tuple of (posts list, session object)
@@ -48,7 +49,7 @@ class BdsmlrScraper:
                 if existing_session.is_complete:
                     return [self._dict_to_blogpost(p) for p in existing_session.posts_scraped], existing_session
                 existing_session.is_complete = False
-                return self._scrape_with_session_control(blog_name, existing_session)
+                return self._scrape_with_session_control(blog_name, existing_session, scrape_mode=scrape_mode)
 
             response = input(
                 f"\nFound {status} scraping session from {existing_session.last_updated}.\n"
@@ -62,7 +63,7 @@ class BdsmlrScraper:
                     return [self._dict_to_blogpost(p) for p in existing_session.posts_scraped], existing_session
                 logger.info(f"Resuming session with {len(existing_session.posts_scraped)} posts")
                 existing_session.is_complete = False
-                return self._scrape_with_session_control(blog_name, existing_session)
+                return self._scrape_with_session_control(blog_name, existing_session, scrape_mode=scrape_mode)
             else:
                 logger.info("User chose not to resume; starting fresh session")
         
@@ -74,21 +75,32 @@ class BdsmlrScraper:
             created_at=datetime.now()
         )
         
-        return self._scrape_with_session_control(blog_name, session)
+        return self._scrape_with_session_control(blog_name, session, scrape_mode=scrape_mode)
     
-    def _scrape_with_session_control(self, blog_name: str, session: ScrapingSession) -> Tuple[List[BlogPost], ScrapingSession]:
+    def _scrape_with_session_control(self, blog_name: str, session: ScrapingSession, scrape_mode: str = "blog") -> Tuple[List[BlogPost], ScrapingSession]:
         """
-        Scrape with interactive session control using infinite scroll behavior.
-        Stays on the same URL and pulls data from sideblog endpoints when available.
+        Scrape with interactive session control.
+        For normal mode, uses infinite scroll behavior and sideblog endpoints when available.
+        For "massedit" mode, uses the /massedit view instead of the public blog URL.
 
         Args:
             blog_name: Blog name to scrape
             session: Existing or new session object
+            scrape_mode: "blog" or "massedit"
 
         Returns:
             Tuple of (posts list, updated session)
         """
         try:
+            # MassEditor-based scraping path
+            if scrape_mode == "massedit":
+                logger.info("Using MassEditor-based scraping mode")
+                session = self._scrape_masseditor(session, blog_name)
+                logger.info(f"Scraping complete. Total posts: {len(session.posts_scraped)}")
+                session.save_to_file(self.session_file)
+                return [self._dict_to_blogpost(p) for p in session.posts_scraped], session
+
+            # Normal blog scraping path
             blog_url = self._discover_blog_url(blog_name)
             logger.info(f"Using blog URL: {blog_url}")
 
@@ -98,11 +110,7 @@ class BdsmlrScraper:
 
             blogid = self._extract_blog_id(initial_response.text, blog_url)
             if not blogid:
-                if self.blog_name.endswith('.bdsmlr.com'):
-                    blogid = self.blog_name
-                    logger.info(f"Using blog name as blogid for bdsmlr subdomain: {blogid}")
-                else:
-                    logger.warning("Could not extract blog ID from page; falling back to static content parsing")
+                logger.warning("Could not extract blog ID from page; falling back to static content parsing")
             else:
                 logger.info(f"Extracted blogid: {blogid}")
 
@@ -251,6 +259,199 @@ class BdsmlrScraper:
             if isinstance(e, KeyboardInterrupt):
                 raise
             raise ScrapingError(f"Failed to scrape blog: {e}")
+
+    def _normalize_blog_short_name(self, blog_name: str) -> str:
+        """Normalize a configured blog name into the short name used in the dashboard sidebar.
+
+        Examples:
+            "the-real-man.bdsmlr.com" -> "the-real-man"
+            "https://the-real-man.bdsmlr.com" -> "the-real-man"
+            "the-real-man" -> "the-real-man"
+        """
+        name = blog_name.strip().lower()
+
+        # Accept full URLs
+        if name.startswith("http://") or name.startswith("https://"):
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(name)
+                name = parsed.netloc
+            except Exception:
+                pass
+
+        # Strip common domain suffix
+        if name.endswith(".bdsmlr.com"):
+            name = name[: -len(".bdsmlr.com")]
+
+        # Remove leading www.
+        if name.startswith("www."):
+            name = name[4:]
+
+        return name
+
+    def _switch_to_dashboard_blog(self, blog_name: str) -> None:
+        """Switch the authenticated dashboard context to the side-blog matching blog_name.
+
+        This mimics clicking the "Your Blogs" sidebar item by POSTing to /changetoblog
+        with the appropriate userid before accessing the MassEditor.
+        """
+        short_name = self._normalize_blog_short_name(blog_name)
+        dashboard_url = urljoin(self.base_url, "/dashboard")
+
+        logger.info(f"Switching dashboard context to blog '{short_name}' before MassEditor scraping")
+
+        response = self.session.get(dashboard_url)
+        response.raise_for_status()
+        html = response.text
+        soup = BeautifulSoup(html, "html.parser")
+
+        chosen_id: Optional[str] = None
+        for rightwrap in soup.select("div.rightbloglist div.rightwrap"):
+            label_elem = rightwrap.find("b")
+            if not label_elem:
+                continue
+            label = label_elem.get_text(strip=True).lower()
+            if label == short_name:
+                chosen_id = rightwrap.get("data-id")
+                break
+
+        if not chosen_id:
+            raise ScrapingError(
+                f"Could not find blog '{short_name}' in dashboard side-blog list; "
+                "cannot safely use MassEditor scraper."
+            )
+
+        token = self._extract_csrf_token(html)
+        headers = {
+            "Referer": dashboard_url,
+            "Origin": self.base_url,
+        }
+        if token:
+            headers["X-CSRF-TOKEN"] = token
+
+        logger.debug(f"POST /changetoblog with userid={chosen_id}")
+        resp = self.session.post(
+            urljoin(self.base_url, "/changetoblog"),
+            data={"userid": chosen_id},
+            headers=headers,
+        )
+        resp.raise_for_status()
+
+        # Small delay to let the server update session context
+        time.sleep(self.session.request_delay)
+
+    def _massedit_next_url(self, soup: BeautifulSoup) -> Optional[str]:
+        """Extract the MassEditor next-page URL from parsed HTML.
+
+        The MassEditor pagination uses a Bootstrap-style <ul class="pagination">.
+        The last page renders the Next button as a *disabled* list item with no
+        anchor tag inside it::
+
+            <li class="disabled"><span>Next &raquo;</span></li>
+
+        An active Next button looks like::
+
+            <li><a href="/massedit?page=2">Next &raquo;</a></li>
+
+        This helper checks for the disabled pattern first so we stop immediately
+        rather than treating the absence of a link as an unexpected error.
+
+        Returns:
+            The href of the next page, or None when we are on the last page.
+        """
+        NEXT_TEXT = re.compile(r'next|>>|\u00bb', re.IGNORECASE)
+
+        # 1. Check whether the Next button is explicitly disabled.
+        #    <li class="disabled"> containing a <span> whose text matches.
+        for li in soup.find_all('li', class_='disabled'):
+            span = li.find('span')
+            if span and NEXT_TEXT.search(span.get_text()):
+                logger.info("MassEditor Next button is disabled - reached last page")
+                return None
+
+        # 2. Look for an active Next anchor anywhere in the pagination.
+        next_anchor = soup.find('a', string=NEXT_TEXT)
+        if next_anchor and next_anchor.get('href'):
+            return urljoin(self.base_url, next_anchor['href'])
+
+        # 3. No disabled marker and no active link either - treat as last page.
+        logger.info("No MassEditor next-page link found - assuming end of list")
+        return None
+
+    def _scrape_masseditor(self, session: ScrapingSession, blog_name: str) -> ScrapingSession:
+        """Scrape posts using the authenticated /massedit view.
+
+        This mode does not rely on the public blog URL or sideblog endpoints and instead
+        walks the MassEditor pages that list all posts for the authenticated user.
+
+        Before accessing /massedit, this method switches the dashboard context to the
+        side-blog matching the configured blog name, replicating the behavior of
+        clicking the blog in the right-hand "Your Blogs" list.
+        """
+        # Ensure the dashboard context is set to the correct side-blog
+        self._switch_to_dashboard_blog(blog_name)
+
+        massedit_url = urljoin(self.base_url, '/massedit')
+        current_url = massedit_url
+        page_index = session.current_page or 1
+
+        while True:
+            logger.info(f"MassEditor page {page_index}...")
+            print(f"\n[MassEditor page {page_index}] Current posts: {len(session.posts_scraped)}")
+
+            try:
+                response = self.session.get(current_url)
+            except KeyboardInterrupt:
+                logger.info("Scraping interrupted by user")
+                break
+
+            response.raise_for_status()
+            html = response.text
+
+            logger.debug(f"MassEditor page content length: {len(html)}")
+            logger.debug(f"MassEditor page content preview: {html[:1000]}...")
+
+            soup = BeautifulSoup(html, 'html.parser')
+
+            # Reuse the generic post parser on the MassEditor HTML
+            page_posts = self._parse_posts(html, current_url)
+
+            if not page_posts:
+                logger.info("No posts found on MassEditor page - assuming end of list")
+                session.is_complete = True
+                break
+
+            # Count new posts added
+            new_posts_count = 0
+            existing_ids = {p['post_id'] for p in session.posts_scraped}
+            for post in page_posts:
+                if post.post_id not in existing_ids:
+                    session.posts_scraped.append(post.to_dict())
+                    session.last_post_id = post.post_id
+                    existing_ids.add(post.post_id)
+                    new_posts_count += 1
+
+            logger.info(f"MassEditor page {page_index}: added {new_posts_count} new posts. Total: {len(session.posts_scraped)}")
+
+            if new_posts_count == 0:
+                logger.info("No new posts found on MassEditor page - reached end of blog")
+                session.is_complete = True
+                break
+
+            # Detect end-of-blog via pagination: disabled Next button or missing link
+            next_url = self._massedit_next_url(soup)
+            if not next_url:
+                session.is_complete = True
+                break
+
+            current_url = next_url
+            page_index += 1
+            session.current_page = page_index
+            session.save_to_file(self.session_file)
+
+            time.sleep(self.session.request_delay)
+
+        return session
     
     def _verify_authentication(self) -> bool:
         """
@@ -620,7 +821,7 @@ class BdsmlrScraper:
         # Check for common blog page indicators and generic content markers
         blog_indicators = [
             soup.find('div', class_=re.compile(r'blog|posts|content')),
-            soup.find('article', class_=re.compile(r'post')),
+            soup.find('article', class_=re.compile(r'post|entry')),
             soup.find_all('h2', class_=re.compile(r'post-title|title')),
             soup.find('div', id=re.compile(r'blog|posts')),
         ]
@@ -803,7 +1004,7 @@ class BdsmlrScraper:
             created_at = self._extract_date(post_elem)
             
             # Classify content type
-            content_type = self._classify_content_type(content, tags)
+            content_type = self._classify_content_type(post_elem, content, tags)
             
             logger.debug(f"Post {post_id} classified as {content_type}: '{content[:100]}...' (tags: {tags})")
             
@@ -951,36 +1152,117 @@ class BdsmlrScraper:
         
         return None
     
-    def _classify_content_type(self, content: str, tags: List[str]) -> str:
-        """
-        Classify the type of post content for filtering.
-        
+    def _classify_content_type(self, post_elem, content: str, tags: List[str]) -> str:
+        """Classify the type of post content for filtering.
+
+        This dispatcher understands MassEditor-style posts (div.postitem with
+        image+caption or textcontent blocks) and falls back to a generic
+        text-based classifier for normal blog/sideblog layouts.
+
         Args:
-            content: Post content text
-            tags: Post tags
-        
+            post_elem: BeautifulSoup element representing the post
+            content: Post content text extracted for this post
+            tags: Post tags as scraped from the HTML
+
         Returns:
             Content type: "text_clear", "image_dependent", "quiz_question", "unknown"
         """
-        # Check for quiz-tagged posts first
-        if any(tag.lower() == "quiz" for tag in tags):
+        # Normalize tags once
+        tags_lower = [t.lower() for t in tags]
+
+        # Quiz posts are always treated as quiz questions regardless of structure
+        if "quiz" in tags_lower:
             return "quiz_question"
-        
+
+        # MassEditor / dashboard style posts use div.postitem wrappers
+        classes = post_elem.get('class') or []
+        if any(cls == "postitem" for cls in classes):
+            return self._classify_masseditor_content_type(post_elem, content, tags_lower)
+
+        # Fallback to generic blog/sideblog classifier
+        return self._classify_generic_content_type(content, tags_lower)
+
+    def _classify_masseditor_content_type(self, post_elem, content: str, tags_lower: List[str]) -> str:
+        """Classify content type for MassEditor-style posts.
+
+        Uses structural signals from the MassEditor HTML:
+        - div.textcontent for pure text posts
+        - div.imagecontent / div.image_content and div.videohold for media
+        - div.singlecommentline for captions
+
+        Returns "text_clear" when the text alone conveys meaning, and
+        "image_dependent" when the post is effectively just media with a
+        minimal or missing caption.
+        """
+        # Heuristic thresholds tuned for typical post lengths
+        STORY_MIN_CHARS = 80
+        CAPTION_STRONG_MIN_CHARS = 40
+
+        # Extract story text from dedicated textcontent blocks
+        story_elem = post_elem.find('div', class_='textcontent')
+        story_text = ""
+        if story_elem:
+            for script in story_elem.find_all(['script', 'style']):
+                script.decompose()
+            story_text = story_elem.get_text(' ', strip=True)
+
+        # Extract caption text from singlecommentline
+        caption_elem = post_elem.find('div', class_='singlecommentline')
+        caption_text = ""
+        if caption_elem:
+            for script in caption_elem.find_all(['script', 'style']):
+                script.decompose()
+            caption_text = caption_elem.get_text(' ', strip=True)
+            if caption_text.strip().lower() == "no caption":
+                caption_text = ""
+
+        # Detect media presence
+        has_image = bool(post_elem.select_one('div.imagecontent img.oneimg, div.image_content img.oneimg'))
+        has_video = bool(post_elem.select_one('div.videohold img'))
+
+        story_len = len(story_text or "")
+        caption_len = len(caption_text or "")
+
+        # 1) Long-form text posts are always text_clear
+        if story_len >= STORY_MIN_CHARS:
+            return "text_clear"
+
+        # 2) Media posts: rely on caption strength
+        if has_image or has_video:
+            if caption_len == 0:
+                return "image_dependent"
+            if caption_len < CAPTION_STRONG_MIN_CHARS:
+                return "image_dependent"
+            # Caption is substantial enough to stand on its own
+            return "text_clear"
+
+        # 3) Shorter text-only posts without media
+        if story_len > 0:
+            return "text_clear"
+
+        # 4) Fallback to generic classifier if structure is unexpected
+        return self._classify_generic_content_type(content, tags_lower)
+
+    def _classify_generic_content_type(self, content: str, tags_lower: List[str]) -> str:
+        """Generic text-based classifier for non-MassEditor posts.
+
+        This preserves the previous behavior for normal blog/sideblog layouts,
+        using only the extracted text content and tags.
+        """
         # Check content length and substance
         content_length = len(content.strip())
-        
+
         # Very short content likely depends on images
         if content_length < 20:
             return "image_dependent"
-        
+
         # Check for substantial text content with clear meaning
-        # Look for complete sentences, specific expectations, or behavioral rules
         sentences = [s.strip() for s in content.split('.') if s.strip()]
-        
+
         # Must have at least 1 complete sentence
         if len(sentences) < 1:
             return "image_dependent"
-        
+
         # Check for attitude/behavior/relationship keywords that indicate clear expectations
         relationship_keywords = [
             'should', 'must', 'expect', 'want', 'need', 'prefer', 'like', 'dislike',
@@ -991,24 +1273,24 @@ class BdsmlrScraper:
             'understanding', 'patient', 'compassionate', 'intelligent', 'funny',
             'ambitious', 'motivated', 'driven', 'successful', 'confident', 'independent'
         ]
-        
+
         content_lower = content.lower()
         keyword_count = sum(1 for keyword in relationship_keywords if keyword in content_lower)
-        
+
         # If we have enough keywords, it's likely text_clear (even if shorter)
         if keyword_count >= 2:
             return "text_clear"
-        
+
         # Check for explicit rules or expectations
         rule_indicators = ['rule', 'expectation', 'requirement', 'standard', 'criteria', 'dealbreaker']
         if any(indicator in content_lower for indicator in rule_indicators):
             return "text_clear"
-        
+
         # Check for phrases that indicate personal preferences/requirements
         preference_indicators = ['i want', 'i need', 'i expect', 'i prefer', 'i value', 'i appreciate']
         if any(indicator in content_lower for indicator in preference_indicators):
             return "text_clear"
-        
+
         # Default to image_dependent if unclear
         return "image_dependent"
     
