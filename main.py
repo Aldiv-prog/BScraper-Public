@@ -123,10 +123,10 @@ def _reanalyze_submenu(posts: List[BlogPost], session: ScrapingSession) -> Optio
     Lets the user pick which analysis phase(s) to run, or go back.
 
     Returns:
-        'all'       – run summarization + trait extraction
-        'summarize' – run summarization only
-        'traits'    – run trait extraction only
-        None        – user chose to go back to the previous menu
+        'all'       - run summarization + trait extraction
+        'summarize' - run summarization only
+        'traits'    - run trait extraction only
+        None        - user chose to go back to the previous menu
     """
     print("\n" + "=" * 60)
     print("RE-ANALYZE EXISTING DATA")
@@ -269,32 +269,30 @@ def _archive_session_workflow(
     config: ConfigLoader
 ) -> None:
     """Interactive workflow for archiving complete analysis results."""
-    
+
     print("\n" + "=" * 60)
     print("SESSION ARCHIVING")
     print("=" * 60)
-    
+
     archival_manager = ArchivalManager()
-    
+
     # Ask for tags
     try:
         tags_input = input("Enter tags for this analysis (comma-separated, optional): ").strip()
         tags = [tag.strip() for tag in tags_input.split(',')] if tags_input else []
     except EOFError:
-        # Handle non-interactive environments
         tags = []
         print("No tags provided (running non-interactively)")
-    
-    # Archive the session
+
     session_id = archival_manager.archive_complete_session(
         scraping_session, aggregated_content, quiz_questions, essay, traits, analysis_metadata, tags
     )
-    
+
     print(f"Analysis archived successfully!")
     print(f"Session ID: {session_id}")
     print(f"Archive location: archives/{session_id}.json")
     print(f"Tags: {', '.join(tags) if tags else 'None'}")
-    
+
     try:
         input("Press Enter to continue...")
     except EOFError:
@@ -303,33 +301,33 @@ def _archive_session_workflow(
 
 def _load_archived_session_workflow(config: ConfigLoader) -> Optional[CompleteAnalysisSession]:
     """Interactive workflow for loading archived sessions."""
-    
+
     archival_manager = ArchivalManager()
     archived_sessions = archival_manager.list_archived_sessions()
-    
+
     if not archived_sessions:
         print("No archived sessions found.")
         return None
-    
+
     print("\n" + "=" * 60)
     print("LOAD ARCHIVED SESSION")
     print("=" * 60)
     print("Available archived sessions:")
     print()
-    
+
     for i, session in enumerate(archived_sessions, 1):
         created = session['created_at'].strftime("%Y-%m-%d %H:%M")
         tags_str = f" [{', '.join(session['tags'])}]" if session['tags'] else ""
         print(f"{i}. {session['blog_name']} - {session['username']}")
         print(f"   {created} | {session['post_count']} posts | {session['trait_count']} traits{tags_str}")
         print()
-    
+
     while True:
         choice = input(f"Select session to load (1-{len(archived_sessions)}) or 'c' to cancel: ").strip()
-        
+
         if choice.lower() == 'c':
             return None
-        
+
         try:
             index = int(choice) - 1
             if 0 <= index < len(archived_sessions):
@@ -343,11 +341,11 @@ def _load_archived_session_workflow(config: ConfigLoader) -> Optional[CompleteAn
 
 def _display_archived_session_details(session: CompleteAnalysisSession) -> None:
     """Display detailed information about an archived analysis session."""
-    
+
     print("\n" + "=" * 60)
     print("ARCHIVED SESSION DETAILS")
     print("=" * 60)
-    
+
     print(f"Session ID: {session.session_id}")
     print(f"Blog: {session.blog_name}")
     print(f"Username: {session.username}")
@@ -356,38 +354,38 @@ def _display_archived_session_details(session: CompleteAnalysisSession) -> None:
     print(f"Version: {session.version}")
     print(f"Tags: {', '.join(session.tags) if session.tags else 'None'}")
     print()
-    
+
     print("CONTENT SUMMARY:")
     print(f"  Posts analyzed: {session.aggregated_content.total_posts}")
     print(f"  Unique tags: {len(session.aggregated_content.unique_tags)}")
     print(f"  Quiz questions: {len(session.quiz_questions)}")
     print()
-    
+
     print("ANALYSIS RESULTS:")
     print(f"  Personality traits identified: {len(session.traits)}")
     print(f"  Essay word count: {len(session.essay.split()) if session.essay else 0}")
     print()
-    
+
     print("ANALYSIS METADATA:")
     for key, value in session.analysis_metadata.items():
         print(f"  {key}: {value}")
     print()
-    
+
     print("ESSAY PREVIEW:")
     essay_preview = session.essay[:300] + "..." if len(session.essay) > 300 else session.essay
     print(f"  {essay_preview}")
     print()
-    
+
     if session.traits:
         print("TOP TRAITS:")
-        for i, trait in enumerate(session.traits[:5], 1):  # Show top 5
+        for i, trait in enumerate(session.traits[:5], 1):
             confidence = trait.get('confidence', 0)
             name = trait.get('name', 'Unknown')
             print(f"  {i}. {name} ({confidence}%)")
         if len(session.traits) > 5:
             print(f"  ... and {len(session.traits) - 5} more")
         print()
-    
+
     input("Press Enter to continue...")
 
 
@@ -398,7 +396,10 @@ def _handle_existing_session_workflow(
 ) -> Tuple[List[BlogPost], ScrapingSession, str]:
     """
     Handle workflow when existing session data is found.
-    Allows user to choose: resume scraping, re-analyze existing data, or start fresh.
+
+    When --phase summarize or --phase traits is passed explicitly on the CLI,
+    this function skips the interactive menu and loads the session directly so
+    that the requested phase runs immediately.
 
     Returns:
         Tuple of (posts, session, next_phase)
@@ -406,9 +407,23 @@ def _handle_existing_session_workflow(
     saved_session = ScrapingSession.load_from_file(session_file)
 
     if not saved_session:
-        # No existing session, return empty and let caller handle
         return [], None, 'scrape'
 
+    # ------------------------------------------------------------------ #
+    # Non-interactive fast-path: --phase summarize / --phase traits        #
+    # Skip the menu entirely and go straight to the requested phase.       #
+    # ------------------------------------------------------------------ #
+    if args.phase in ('summarize', 'traits'):
+        posts = _posts_from_session(saved_session)
+        logger.info(
+            f"--phase {args.phase} specified; loading session directly "
+            f"({len(posts)} posts, skipping interactive menu)."
+        )
+        return posts, saved_session, args.phase
+
+    # ------------------------------------------------------------------ #
+    # Interactive path: --phase all (default) or --phase scrape            #
+    # ------------------------------------------------------------------ #
     print("\n" + "=" * 60)
     print("EXISTING SESSION FOUND")
     print("=" * 60)
@@ -439,7 +454,6 @@ def _handle_existing_session_workflow(
                 posts, session = _load_scraping_session(session_file)
                 phase = _reanalyze_submenu(posts, session)
                 if phase is None:
-                    # User chose 'Back' — loop back to the parent menu
                     continue
                 return posts, session, phase
             elif choice == '2':
@@ -484,7 +498,6 @@ def _handle_existing_session_workflow(
                 posts, session = _load_scraping_session(session_file)
                 phase = _reanalyze_submenu(posts, session)
                 if phase is None:
-                    # User chose 'Back' — loop back to the parent menu
                     continue
                 return posts, session, phase
             elif choice == '3':
@@ -507,8 +520,8 @@ def _handle_existing_session_workflow(
 
 
 def main():
-    """Main pipeline: Scrape → Summarize → Extract Traits."""
-    
+    """Main pipeline: Scrape -> Summarize -> Extract Traits."""
+
     parser = argparse.ArgumentParser(description='BScraper: Blog Analysis Pipeline')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose logging')
     parser.add_argument('--config', default='config.yaml', help='Path to config file')
@@ -536,13 +549,11 @@ def main():
     parser.add_argument('--scrape-mode', choices=['blog', 'massedit'], default='blog',
                         help='Scraping strategy: normal blog view or MassEditor page')
     args = parser.parse_args()
-    
+
     try:
-        # Load configuration
         logger.info("Loading configuration...")
         config = ConfigLoader(args.config)
-        
-        # Set logging level based on verbose flag
+
         if args.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
             for name in ['main', 'scraper.session', 'scraper.bdsmlr', 'processor', 'ai_engine']:
@@ -550,45 +561,49 @@ def main():
                 log.setLevel(logging.DEBUG)
                 for handler in log.handlers:
                     handler.setLevel(logging.DEBUG)
-        
+
         scraper_config = config.get_scraper_config()
         summarizer_config = config.get_summarizer_config()
         traits_config = config.get_traits_config()
         output_config = config.get_output_config()
-        
+
         session_file = args.session_file
         blog_name = scraper_config.get('blog_name')
         if not blog_name:
             raise BScrapeException("blog_name not configured in config.yaml")
 
-        # Handle archival CLI commands first
+        # ------------------------------------------------------------------ #
+        # Archival / utility CLI commands — handle and exit immediately        #
+        # ------------------------------------------------------------------ #
         if args.list_archives:
             archival_manager = ArchivalManager()
             archived_sessions = archival_manager.list_archived_sessions()
-            
+
             if not archived_sessions:
                 print("No archived sessions found.")
                 return 0
-            
+
             print("\n" + "=" * 80)
             print("ARCHIVED ANALYSIS SESSIONS")
             print("=" * 80)
-            
+
             for i, session in enumerate(archived_sessions, 1):
                 created = session['created_at'].strftime("%Y-%m-%d %H:%M")
                 tags_str = f" [{', '.join(session['tags'])}]" if session['tags'] else ""
-                print(f"{i:2d}. {session['blog_name']:<20} | {session['username']:<15} | {created} | {session['post_count']:3d} posts | {session['trait_count']:2d} traits{tags_str}")
-            
+                print(f"{i:2d}. {session['blog_name']:<20} | {session['username']:<15} | "
+                      f"{created} | {session['post_count']:3d} posts | "
+                      f"{session['trait_count']:2d} traits{tags_str}")
+
             print(f"\nTotal: {len(archived_sessions)} archived sessions")
             return 0
-        
+
         elif args.list_session_backups:
             backup_dir = Path('archives/session_backups')
             backups = sorted(backup_dir.glob('*.json'), reverse=True) if backup_dir.exists() else []
             if not backups:
                 print("No session backups found.")
                 return 0
-            
+
             print("\n" + "=" * 80)
             print("SESSION BACKUP ARCHIVES")
             print("=" * 80)
@@ -597,18 +612,18 @@ def main():
                 print(f"{i:2d}. {backup.name:<40} | {created}")
             print(f"\nTotal: {len(backups)} session backups")
             return 0
-        
+
         elif args.save_session_backup:
             backup_path = _backup_scraping_session(session_file)
             print(f"Saved session archive to: {backup_path}")
             return 0
-        
+
         elif args.load_archive:
             archived_session = _load_archived_session_workflow(config)
             if archived_session:
                 _display_archived_session_details(archived_session)
             return 0
-        
+
         elif args.load_session_backup:
             loaded = _load_session_backup_workflow()
             if loaded:
@@ -616,34 +631,35 @@ def main():
                 print(f"Loaded backup session from archive. {len(posts)} posts available.")
             return 0
 
+        # ------------------------------------------------------------------ #
+        # Main pipeline                                                        #
+        # ------------------------------------------------------------------ #
         posts: List[BlogPost] = []
         scraping_session: Optional[ScrapingSession] = None
         session_manager: Optional[SessionManager] = None
 
-        # Handle existing session workflow first
-        if args.phase in ('all', 'scrape', 'summarize', 'traits'):
-            posts, scraping_session, workflow_decision = _handle_existing_session_workflow(
-                session_file, config, args
-            )
+        # Resolve workflow decision (may show interactive menu or bypass it)
+        posts, scraping_session, workflow_decision = _handle_existing_session_workflow(
+            session_file, config, args
+        )
 
-            if workflow_decision == 'quit':
-                logger.info("User chose to quit")
-                return 0
-            elif workflow_decision == 'scrape':
-                # Continue with normal scraping flow
-                pass
-            elif workflow_decision in ('all', 'resume_scraping', 'summarize', 'traits'):
-                # We have data, proceed based on the decision returned by the workflow
-                if workflow_decision == 'resume_scraping':
-                    args.phase = 'scrape'
-                elif workflow_decision in ('summarize', 'traits', 'all'):
-                    args.phase = workflow_decision
+        if workflow_decision == 'quit':
+            logger.info("User chose to quit")
+            return 0
+        elif workflow_decision == 'scrape':
+            pass  # Fall through to scraping block below
+        elif workflow_decision in ('all', 'summarize', 'traits', 'resume_scraping'):
+            if workflow_decision == 'resume_scraping':
+                args.phase = 'scrape'
             else:
-                # Should not reach here
-                raise BScrapeException(f"Unexpected workflow decision: {workflow_decision}")
+                args.phase = workflow_decision
+        else:
+            raise BScrapeException(f"Unexpected workflow decision: {workflow_decision}")
 
+        # ------------------------------------------------------------------ #
+        # PHASE 1: SCRAPING                                                    #
+        # ------------------------------------------------------------------ #
         if args.phase in ('all', 'scrape') and not posts:
-            # PHASE 1: Scraping is required for both full pipeline and scrape-only mode
             logger.info("Prompting for credentials...")
             username = input("Enter bdsmlr.com username: ")
             logger.info("Username received")
@@ -679,7 +695,6 @@ def main():
             logger.info(f"Scraped {len(posts)} posts from {blog_name}")
 
             if args.phase == 'scrape':
-                # Interactive post-scraping workflow
                 next_phase = _interactive_post_scraping_workflow(
                     posts, scraping_session, config, session_file, args
                 )
@@ -689,117 +704,83 @@ def main():
                 elif next_phase in ('all', 'summarize', 'traits'):
                     args.phase = next_phase
                 else:
-                    # Should not reach here
                     raise BScrapeException(f"Unexpected next phase: {next_phase}")
 
-        elif args.phase == 'summarize':
-            if not posts:
-                saved_session = ScrapingSession.load_from_file(session_file)
-                if args.resume and saved_session and not saved_session.is_complete:
-                    logger.info("Resuming unfinished scraping session before summarization")
-                    logger.info("Prompting for credentials...")
-                    username = input("Enter bdsmlr.com username: ")
-                    logger.info("Username received")
-                    password = getpass.getpass("Enter bdsmlr.com password: ")
-                    logger.info("Password input received")
+        elif args.phase in ('summarize', 'traits') and not posts:
+            # Safety net: posts should already be loaded by the fast-path in
+            # _handle_existing_session_workflow, but load from disk if somehow empty.
+            posts, scraping_session = _load_scraping_session(session_file)
+            logger.info(f"Loaded saved scraping session with {len(posts)} posts")
 
-                    proxy_config = scraper_config.get('proxy', {})
-                    proxy_url = proxy_config.get('url') if proxy_config.get('enabled') else None
-                    session_manager = SessionManager(
-                        base_url=scraper_config.get('base_url', 'https://bdsmlr.com'),
-                        proxy_url=proxy_url,
-                        request_delay=scraper_config.get('request_delay', 2),
-                        timeout=scraper_config.get('timeout', 10),
-                        verify_ssl=scraper_config.get('verify_ssl', True)
-                    )
-                    logger.info(f"Authenticating as {username}...")
-                    if not session_manager.authenticate(username, password):
-                        raise BScrapeException("Authentication failed")
-
-                    scraper = BdsmlrScraper(session_manager, session_file=session_file)
-                    posts, scraping_session = scraper.scrape_blog_interactive(
-                        blog_name,
-                        username,
-                        auto_resume=True,
-                        scrape_mode=args.scrape_mode
-                    )
-                    logger.info(f"Resumed scraping and collected {len(posts)} posts")
-                else:
-                    posts, scraping_session = _load_scraping_session(session_file)
-                    logger.info(f"Loaded saved scraping session with {len(posts)} posts")
-
-        elif args.phase == 'traits':
-            if not posts:
-                # Load raw content from scraping session to extract traits
-                posts, scraping_session = _load_scraping_session(session_file)
-                logger.info(f"Loaded {len(posts)} posts from session for trait extraction")
-
-        # Deduplicate
+        # ------------------------------------------------------------------ #
+        # Shared pre-processing (runs for any phase that needs AI analysis)   #
+        # ------------------------------------------------------------------ #
         deduplicator = ContentDeduplicator()
         unique_posts = deduplicator.deduplicate(posts)
-        
-        # Aggregate
+
         aggregator = ContentAggregator()
         aggregated, quiz_questions = aggregator.aggregate(unique_posts)
-        
+
         logger.info(f"Raw content: {len(aggregated.raw_text)} characters")
         logger.info(f"Unique tags: {len(aggregated.unique_tags)}")
         logger.info(f"Quiz questions saved: {len(quiz_questions)}")
-        
-        # Initialize Ollama (needed by both summarization and traits phases)
+
         ollama_client = OllamaClient(
             base_url=summarizer_config.get('ollama_url', 'http://localhost:11434'),
             model=summarizer_config.get('ollama_model', 'gemma-3-4b-it-uncensored-v2-gguf:q5_k_m'),
             timeout=summarizer_config.get('timeout', 120)
         )
-        
+
         logger.info("Checking Ollama connection...")
         ollama_client.check_connection()
 
         essay = None
         traits = []
 
-        # ==================== PHASE 2: SUMMARIZATION ====================
+        # ------------------------------------------------------------------ #
+        # PHASE 2: SUMMARIZATION                                               #
+        # ------------------------------------------------------------------ #
         if args.phase in ('all', 'summarize'):
             logger.info("=" * 60)
             logger.info("PHASE 2: SUMMARIZATION")
             logger.info("=" * 60)
-            
+
             summarizer = EssaySummarizer(
                 ollama_client=ollama_client,
                 target_words=output_config.get('essay_word_count', 750)
             )
-            
+
             essay = summarizer.summarize(aggregated.raw_text, list(aggregated.unique_tags))
-            
-            # Save essay — explicitly UTF-8 to handle any Unicode characters in AI output
+
             essay_path = Path(output_config.get('essay_file', 'output/essay.txt'))
             essay_path.parent.mkdir(parents=True, exist_ok=True)
             essay_path.write_text(essay, encoding='utf-8')
             logger.info(f"Essay saved to {essay_path}")
-        
-        # ==================== PHASE 3: TRAIT EXTRACTION ====================
+
+        # ------------------------------------------------------------------ #
+        # PHASE 3: TRAIT EXTRACTION                                            #
+        # ------------------------------------------------------------------ #
         if args.phase in ('all', 'traits'):
             logger.info("=" * 60)
             logger.info("PHASE 3: TRAIT EXTRACTION")
             logger.info("=" * 60)
-            
+
             confidence_threshold = output_config.get('traits_confidence_threshold', 50)
-            
+
             trait_extractor = PersonalityTraitExtractor(
                 ollama_client=ollama_client,
                 base_traits=traits_config.get('base_traits', []),
                 custom_traits=traits_config.get('custom_traits', []),
                 confidence_threshold=confidence_threshold
             )
-            
+
             trait_extractor.generate_traits_from_content(
                 raw_content=aggregated.raw_text,
                 tags=list(aggregated.unique_tags)
             )
-            
+
             traits = trait_extractor.extract_traits()
-            
+
             traits_output = {
                 'traits': traits,
                 'summary_reference': 'logs/ai_engine_trait_response_raw.txt',
@@ -807,14 +788,15 @@ def main():
                 'total_identified': len(traits),
                 'expected_total': traits_config.get('total_count', 20)
             }
-            
-            # Save traits — explicitly UTF-8 to handle any Unicode characters in AI output
+
             traits_path = Path(output_config.get('traits_file', 'output/traits.json'))
             traits_path.parent.mkdir(parents=True, exist_ok=True)
             traits_path.write_text(json.dumps(traits_output, indent=2, ensure_ascii=False), encoding='utf-8')
             logger.info(f"Traits saved to {traits_path}")
-        
-        # ==================== SUMMARY ====================
+
+        # ------------------------------------------------------------------ #
+        # SUMMARY                                                              #
+        # ------------------------------------------------------------------ #
         logger.info("=" * 60)
         logger.info("PIPELINE COMPLETE")
         logger.info("=" * 60)
@@ -823,8 +805,7 @@ def main():
             logger.info(f"Generated {output_config.get('essay_word_count', 750)}-word essay")
         if traits:
             logger.info(f"Identified {len(traits)} personality traits")
-        
-        # Archive complete session if requested
+
         if args.archive:
             analysis_metadata = {
                 'ollama_model': summarizer_config.get('ollama_model'),
@@ -833,14 +814,13 @@ def main():
                 'scraped_at': scraping_session.created_at.isoformat() if scraping_session else None,
                 'analyzed_at': datetime.now().isoformat()
             }
-            
             _archive_session_workflow(
                 scraping_session, aggregated, quiz_questions, essay or '', traits, analysis_metadata, config
             )
-        
+
         if session_manager:
             session_manager.close()
-        
+
     except BScrapeException as e:
         logger.error(f"Pipeline error: {e}")
         return 1
@@ -850,7 +830,7 @@ def main():
     except Exception as e:
         logger.exception(f"Unexpected error: {e}")
         return 1
-    
+
     return 0
 
 
