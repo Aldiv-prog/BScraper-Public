@@ -23,7 +23,7 @@ class BdsmlrScraper:
         self.base_url = session_manager.base_url
         self.session_file = session_file
     
-    def scrape_blog_interactive(self, blog_name: str, username: str, auto_resume: bool = False) -> Tuple[List[BlogPost], ScrapingSession]:
+    def scrape_blog_interactive(self, blog_name: str, username: str, auto_resume: bool = False, scrape_mode: str = "blog") -> Tuple[List[BlogPost], ScrapingSession]:
         """
         Scrape blog with interactive control and session management.
         
@@ -31,6 +31,7 @@ class BdsmlrScraper:
             blog_name: Blog name/domain to scrape
             username: Username for session tracking
             auto_resume: If True, automatically resume a saved session without prompts
+            scrape_mode: "blog" for normal blog view, "massedit" for MassEditor-based scraping
         
         Returns:
             Tuple of (posts list, session object)
@@ -48,7 +49,7 @@ class BdsmlrScraper:
                 if existing_session.is_complete:
                     return [self._dict_to_blogpost(p) for p in existing_session.posts_scraped], existing_session
                 existing_session.is_complete = False
-                return self._scrape_with_session_control(blog_name, existing_session)
+                return self._scrape_with_session_control(blog_name, existing_session, scrape_mode=scrape_mode)
 
             response = input(
                 f"\nFound {status} scraping session from {existing_session.last_updated}.\n"
@@ -62,7 +63,7 @@ class BdsmlrScraper:
                     return [self._dict_to_blogpost(p) for p in existing_session.posts_scraped], existing_session
                 logger.info(f"Resuming session with {len(existing_session.posts_scraped)} posts")
                 existing_session.is_complete = False
-                return self._scrape_with_session_control(blog_name, existing_session)
+                return self._scrape_with_session_control(blog_name, existing_session, scrape_mode=scrape_mode)
             else:
                 logger.info("User chose not to resume; starting fresh session")
         
@@ -74,21 +75,32 @@ class BdsmlrScraper:
             created_at=datetime.now()
         )
         
-        return self._scrape_with_session_control(blog_name, session)
+        return self._scrape_with_session_control(blog_name, session, scrape_mode=scrape_mode)
     
-    def _scrape_with_session_control(self, blog_name: str, session: ScrapingSession) -> Tuple[List[BlogPost], ScrapingSession]:
+    def _scrape_with_session_control(self, blog_name: str, session: ScrapingSession, scrape_mode: str = "blog") -> Tuple[List[BlogPost], ScrapingSession]:
         """
-        Scrape with interactive session control using infinite scroll behavior.
-        Stays on the same URL and pulls data from sideblog endpoints when available.
+        Scrape with interactive session control.
+        For normal mode, uses infinite scroll behavior and sideblog endpoints when available.
+        For "massedit" mode, uses the /massedit view instead of the public blog URL.
 
         Args:
             blog_name: Blog name to scrape
             session: Existing or new session object
+            scrape_mode: "blog" or "massedit"
 
         Returns:
             Tuple of (posts list, updated session)
         """
         try:
+            # MassEditor-based scraping path
+            if scrape_mode == "massedit":
+                logger.info("Using MassEditor-based scraping mode")
+                session = self._scrape_masseditor(session)
+                logger.info(f"Scraping complete. Total posts: {len(session.posts_scraped)}")
+                session.save_to_file(self.session_file)
+                return [self._dict_to_blogpost(p) for p in session.posts_scraped], session
+
+            # Normal blog scraping path
             blog_url = self._discover_blog_url(blog_name)
             logger.info(f"Using blog URL: {blog_url}")
 
@@ -98,11 +110,7 @@ class BdsmlrScraper:
 
             blogid = self._extract_blog_id(initial_response.text, blog_url)
             if not blogid:
-                if self.blog_name.endswith('.bdsmlr.com'):
-                    blogid = self.blog_name
-                    logger.info(f"Using blog name as blogid for bdsmlr subdomain: {blogid}")
-                else:
-                    logger.warning("Could not extract blog ID from page; falling back to static content parsing")
+                logger.warning("Could not extract blog ID from page; falling back to static content parsing")
             else:
                 logger.info(f"Extracted blogid: {blogid}")
 
@@ -251,6 +259,74 @@ class BdsmlrScraper:
             if isinstance(e, KeyboardInterrupt):
                 raise
             raise ScrapingError(f"Failed to scrape blog: {e}")
+    
+    def _scrape_masseditor(self, session: ScrapingSession) -> ScrapingSession:
+        """Scrape posts using the authenticated /massedit view.
+
+        This mode does not rely on the public blog URL or sideblog endpoints and instead
+        walks the MassEditor pages that list all posts for the authenticated user.
+        """
+        massedit_url = urljoin(self.base_url, '/massedit')
+        current_url = massedit_url
+        page_index = session.current_page or 1
+
+        while True:
+            logger.info(f"MassEditor page {page_index}...")
+            print(f"\n[MassEditor page {page_index}] Current posts: {len(session.posts_scraped)}")
+
+            try:
+                response = self.session.get(current_url)
+            except KeyboardInterrupt:
+                logger.info("Scraping interrupted by user")
+                break
+
+            response.raise_for_status()
+            html = response.text
+
+            logger.debug(f"MassEditor page content length: {len(html)}")
+            logger.debug(f"MassEditor page content preview: {html[:1000]}...")
+
+            # Reuse the generic post parser on the MassEditor HTML
+            page_posts = self._parse_posts(html, current_url)
+
+            if not page_posts:
+                logger.info("No posts found on MassEditor page - assuming end of list")
+                session.is_complete = True
+                break
+
+            # Count new posts added
+            new_posts_count = 0
+            existing_ids = {p['post_id'] for p in session.posts_scraped}
+            for post in page_posts:
+                if post.post_id not in existing_ids:
+                    session.posts_scraped.append(post.to_dict())
+                    session.last_post_id = post.post_id
+                    existing_ids.add(post.post_id)
+                    new_posts_count += 1
+
+            logger.info(f"MassEditor page {page_index}: added {new_posts_count} new posts. Total: {len(session.posts_scraped)}")
+
+            if new_posts_count == 0:
+                logger.info("No new posts found on MassEditor page - reached end of blog")
+                session.is_complete = True
+                break
+
+            # Try to find a "next" link in the MassEditor UI
+            soup = BeautifulSoup(html, 'html.parser')
+            next_link = soup.find('a', string=re.compile(r'next|older|>>|»', re.IGNORECASE))
+            if not next_link or not next_link.get('href'):
+                logger.info("No MassEditor next-page link found - assuming end of list")
+                session.is_complete = True
+                break
+
+            current_url = urljoin(self.base_url, next_link['href'])
+            page_index += 1
+            session.current_page = page_index
+            session.save_to_file(self.session_file)
+
+            time.sleep(self.session.request_delay)
+
+        return session
     
     def _verify_authentication(self) -> bool:
         """
