@@ -732,10 +732,10 @@ def main():
         
         essay = summarizer.summarize(aggregated.raw_text, list(aggregated.unique_tags))
         
-        # Save essay
+        # Save essay — explicitly UTF-8 to handle any Unicode characters in AI output
         essay_path = Path(output_config.get('essay_file', 'output/essay.txt'))
         essay_path.parent.mkdir(parents=True, exist_ok=True)
-        essay_path.write_text(essay)
+        essay_path.write_text(essay, encoding='utf-8')
         logger.info(f"Essay saved to {essay_path}")
         
         # ==================== PHASE 3: TRAIT EXTRACTION ====================
@@ -771,10 +771,10 @@ def main():
             'expected_total': traits_config.get('total_count', 20)
         }
         
-        # Save traits
+        # Save traits — explicitly UTF-8 to handle any Unicode characters in AI output
         traits_path = Path(output_config.get('traits_file', 'output/traits.json'))
         traits_path.parent.mkdir(parents=True, exist_ok=True)
-        traits_path.write_text(json.dumps(traits_output, indent=2, ensure_ascii=False))
+        traits_path.write_text(json.dumps(traits_output, indent=2, ensure_ascii=False), encoding='utf-8')
         logger.info(f"Traits saved to {traits_path}")
         
         # ==================== SUMMARY ====================
