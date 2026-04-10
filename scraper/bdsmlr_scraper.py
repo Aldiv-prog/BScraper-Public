@@ -95,7 +95,7 @@ class BdsmlrScraper:
             # MassEditor-based scraping path
             if scrape_mode == "massedit":
                 logger.info("Using MassEditor-based scraping mode")
-                session = self._scrape_masseditor(session)
+                session = self._scrape_masseditor(session, blog_name)
                 logger.info(f"Scraping complete. Total posts: {len(session.posts_scraped)}")
                 session.save_to_file(self.session_file)
                 return [self._dict_to_blogpost(p) for p in session.posts_scraped], session
@@ -259,13 +259,100 @@ class BdsmlrScraper:
             if isinstance(e, KeyboardInterrupt):
                 raise
             raise ScrapingError(f"Failed to scrape blog: {e}")
+
+    def _normalize_blog_short_name(self, blog_name: str) -> str:
+        """Normalize a configured blog name into the short name used in the dashboard sidebar.
+
+        Examples:
+            "the-real-man.bdsmlr.com" -> "the-real-man"
+            "https://the-real-man.bdsmlr.com" -> "the-real-man"
+            "the-real-man" -> "the-real-man"
+        """
+        name = blog_name.strip().lower()
+
+        # Accept full URLs
+        if name.startswith("http://") or name.startswith("https://"):
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(name)
+                name = parsed.netloc
+            except Exception:
+                pass
+
+        # Strip common domain suffix
+        if name.endswith(".bdsmlr.com"):
+            name = name[: -len(".bdsmlr.com")]
+
+        # Remove leading www.
+        if name.startswith("www."):
+            name = name[4:]
+
+        return name
+
+    def _switch_to_dashboard_blog(self, blog_name: str) -> None:
+        """Switch the authenticated dashboard context to the side-blog matching blog_name.
+
+        This mimics clicking the "Your Blogs" sidebar item by POSTing to /changetoblog
+        with the appropriate userid before accessing the MassEditor.
+        """
+        short_name = self._normalize_blog_short_name(blog_name)
+        dashboard_url = urljoin(self.base_url, "/dashboard")
+
+        logger.info(f"Switching dashboard context to blog '{short_name}' before MassEditor scraping")
+
+        response = self.session.get(dashboard_url)
+        response.raise_for_status()
+        html = response.text
+        soup = BeautifulSoup(html, "html.parser")
+
+        chosen_id: Optional[str] = None
+        for rightwrap in soup.select("div.rightbloglist div.rightwrap"):
+            label_elem = rightwrap.find("b")
+            if not label_elem:
+                continue
+            label = label_elem.get_text(strip=True).lower()
+            if label == short_name:
+                chosen_id = rightwrap.get("data-id")
+                break
+
+        if not chosen_id:
+            raise ScrapingError(
+                f"Could not find blog '{short_name}' in dashboard side-blog list; "
+                "cannot safely use MassEditor scraper."
+            )
+
+        token = self._extract_csrf_token(html)
+        headers = {
+            "Referer": dashboard_url,
+            "Origin": self.base_url,
+        }
+        if token:
+            headers["X-CSRF-TOKEN"] = token
+
+        logger.debug(f"POST /changetoblog with userid={chosen_id}")
+        resp = self.session.post(
+            urljoin(self.base_url, "/changetoblog"),
+            data={"userid": chosen_id},
+            headers=headers,
+        )
+        resp.raise_for_status()
+
+        # Small delay to let the server update session context
+        time.sleep(self.session.request_delay)
     
-    def _scrape_masseditor(self, session: ScrapingSession) -> ScrapingSession:
+    def _scrape_masseditor(self, session: ScrapingSession, blog_name: str) -> ScrapingSession:
         """Scrape posts using the authenticated /massedit view.
 
         This mode does not rely on the public blog URL or sideblog endpoints and instead
         walks the MassEditor pages that list all posts for the authenticated user.
+
+        Before accessing /massedit, this method switches the dashboard context to the
+        side-blog matching the configured blog name, replicating the behavior of
+        clicking the blog in the right-hand "Your Blogs" list.
         """
+        # Ensure the dashboard context is set to the correct side-blog
+        self._switch_to_dashboard_blog(blog_name)
+
         massedit_url = urljoin(self.base_url, '/massedit')
         current_url = massedit_url
         page_index = session.current_page or 1
