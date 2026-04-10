@@ -339,7 +339,45 @@ class BdsmlrScraper:
 
         # Small delay to let the server update session context
         time.sleep(self.session.request_delay)
-    
+
+    def _massedit_next_url(self, soup: BeautifulSoup) -> Optional[str]:
+        """Extract the MassEditor next-page URL from parsed HTML.
+
+        The MassEditor pagination uses a Bootstrap-style <ul class="pagination">.
+        The last page renders the Next button as a *disabled* list item with no
+        anchor tag inside it::
+
+            <li class="disabled"><span>Next &raquo;</span></li>
+
+        An active Next button looks like::
+
+            <li><a href="/massedit?page=2">Next &raquo;</a></li>
+
+        This helper checks for the disabled pattern first so we stop immediately
+        rather than treating the absence of a link as an unexpected error.
+
+        Returns:
+            The href of the next page, or None when we are on the last page.
+        """
+        NEXT_TEXT = re.compile(r'next|>>|\u00bb', re.IGNORECASE)
+
+        # 1. Check whether the Next button is explicitly disabled.
+        #    <li class="disabled"> containing a <span> whose text matches.
+        for li in soup.find_all('li', class_='disabled'):
+            span = li.find('span')
+            if span and NEXT_TEXT.search(span.get_text()):
+                logger.info("MassEditor Next button is disabled - reached last page")
+                return None
+
+        # 2. Look for an active Next anchor anywhere in the pagination.
+        next_anchor = soup.find('a', string=NEXT_TEXT)
+        if next_anchor and next_anchor.get('href'):
+            return urljoin(self.base_url, next_anchor['href'])
+
+        # 3. No disabled marker and no active link either - treat as last page.
+        logger.info("No MassEditor next-page link found - assuming end of list")
+        return None
+
     def _scrape_masseditor(self, session: ScrapingSession, blog_name: str) -> ScrapingSession:
         """Scrape posts using the authenticated /massedit view.
 
@@ -373,6 +411,8 @@ class BdsmlrScraper:
             logger.debug(f"MassEditor page content length: {len(html)}")
             logger.debug(f"MassEditor page content preview: {html[:1000]}...")
 
+            soup = BeautifulSoup(html, 'html.parser')
+
             # Reuse the generic post parser on the MassEditor HTML
             page_posts = self._parse_posts(html, current_url)
 
@@ -398,15 +438,13 @@ class BdsmlrScraper:
                 session.is_complete = True
                 break
 
-            # Try to find a "next" link in the MassEditor UI
-            soup = BeautifulSoup(html, 'html.parser')
-            next_link = soup.find('a', string=re.compile(r'next|older|>>|»', re.IGNORECASE))
-            if not next_link or not next_link.get('href'):
-                logger.info("No MassEditor next-page link found - assuming end of list")
+            # Detect end-of-blog via pagination: disabled Next button or missing link
+            next_url = self._massedit_next_url(soup)
+            if not next_url:
                 session.is_complete = True
                 break
 
-            current_url = urljoin(self.base_url, next_link['href'])
+            current_url = next_url
             page_index += 1
             session.current_page = page_index
             session.save_to_file(self.session_file)
