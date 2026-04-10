@@ -117,6 +117,41 @@ def _load_session_backup_workflow(backup_root: str = 'archives/session_backups')
         print("Invalid selection. Please enter a valid number or 'c'.")
 
 
+def _reanalyze_submenu(posts: List[BlogPost], session: ScrapingSession) -> Optional[str]:
+    """
+    Submenu shown after the user chooses 'Re-analyze existing data'.
+    Lets the user pick which analysis phase(s) to run, or go back.
+
+    Returns:
+        'all'       – run summarization + trait extraction
+        'summarize' – run summarization only
+        'traits'    – run trait extraction only
+        None        – user chose to go back to the previous menu
+    """
+    print("\n" + "=" * 60)
+    print("RE-ANALYZE EXISTING DATA")
+    print("=" * 60)
+    print(f"Session: {session.blog_name} | {len(posts)} posts loaded")
+
+    sub_options = [
+        "1. Run full analysis (summarization + trait extraction)",
+        "2. Run summarization only (generate essay)",
+        "3. Run trait extraction only",
+        "4. Back to previous menu",
+    ]
+
+    choice = _prompt_menu_choice(sub_options, prompt="Select analysis option")
+
+    if choice == '1':
+        return 'all'
+    elif choice == '2':
+        return 'summarize'
+    elif choice == '3':
+        return 'traits'
+    elif choice == '4':
+        return None
+
+
 def _interactive_post_scraping_workflow(
     posts: List[BlogPost],
     scraping_session: ScrapingSession,
@@ -402,7 +437,11 @@ def _handle_existing_session_workflow(
 
             if choice == '1':
                 posts, session = _load_scraping_session(session_file)
-                return posts, session, 'all'
+                phase = _reanalyze_submenu(posts, session)
+                if phase is None:
+                    # User chose 'Back' — loop back to the parent menu
+                    continue
+                return posts, session, phase
             elif choice == '2':
                 return [], None, 'scrape'
             elif choice == '3':
@@ -443,7 +482,11 @@ def _handle_existing_session_workflow(
                 return posts, session, 'resume_scraping'
             elif choice == '2':
                 posts, session = _load_scraping_session(session_file)
-                return posts, session, 'all'
+                phase = _reanalyze_submenu(posts, session)
+                if phase is None:
+                    # User chose 'Back' — loop back to the parent menu
+                    continue
+                return posts, session, phase
             elif choice == '3':
                 return [], None, 'scrape'
             elif choice == '4':
@@ -589,18 +632,12 @@ def main():
             elif workflow_decision == 'scrape':
                 # Continue with normal scraping flow
                 pass
-            elif workflow_decision in ('all', 'resume_scraping'):
-                # We have data, proceed based on phase
-                if args.phase == 'traits' and workflow_decision != 'resume_scraping':
-                    # Skip to traits phase
-                    pass
-                elif args.phase == 'summarize' and workflow_decision != 'resume_scraping':
-                    # Skip to summarize phase
-                    pass
-                elif workflow_decision == 'resume_scraping':
-                    # Resume scraping
+            elif workflow_decision in ('all', 'resume_scraping', 'summarize', 'traits'):
+                # We have data, proceed based on the decision returned by the workflow
+                if workflow_decision == 'resume_scraping':
                     args.phase = 'scrape'
-                # For 'all', continue with full pipeline
+                elif workflow_decision in ('summarize', 'traits', 'all'):
+                    args.phase = workflow_decision
             else:
                 # Should not reach here
                 raise BScrapeException(f"Unexpected workflow decision: {workflow_decision}")
@@ -709,12 +746,7 @@ def main():
         logger.info(f"Unique tags: {len(aggregated.unique_tags)}")
         logger.info(f"Quiz questions saved: {len(quiz_questions)}")
         
-        # ==================== PHASE 2: SUMMARIZATION ====================
-        logger.info("=" * 60)
-        logger.info("PHASE 2: SUMMARIZATION")
-        logger.info("=" * 60)
-        
-        # Initialize Ollama
+        # Initialize Ollama (needed by both summarization and traits phases)
         ollama_client = OllamaClient(
             base_url=summarizer_config.get('ollama_url', 'http://localhost:11434'),
             model=summarizer_config.get('ollama_model', 'gemma-3-4b-it-uncensored-v2-gguf:q5_k_m'),
@@ -723,70 +755,74 @@ def main():
         
         logger.info("Checking Ollama connection...")
         ollama_client.check_connection()
-        
-        # Generate essay
-        summarizer = EssaySummarizer(
-            ollama_client=ollama_client,
-            target_words=output_config.get('essay_word_count', 750)
-        )
-        
-        essay = summarizer.summarize(aggregated.raw_text, list(aggregated.unique_tags))
-        
-        # Save essay — explicitly UTF-8 to handle any Unicode characters in AI output
-        essay_path = Path(output_config.get('essay_file', 'output/essay.txt'))
-        essay_path.parent.mkdir(parents=True, exist_ok=True)
-        essay_path.write_text(essay, encoding='utf-8')
-        logger.info(f"Essay saved to {essay_path}")
+
+        essay = None
+        traits = []
+
+        # ==================== PHASE 2: SUMMARIZATION ====================
+        if args.phase in ('all', 'summarize'):
+            logger.info("=" * 60)
+            logger.info("PHASE 2: SUMMARIZATION")
+            logger.info("=" * 60)
+            
+            summarizer = EssaySummarizer(
+                ollama_client=ollama_client,
+                target_words=output_config.get('essay_word_count', 750)
+            )
+            
+            essay = summarizer.summarize(aggregated.raw_text, list(aggregated.unique_tags))
+            
+            # Save essay — explicitly UTF-8 to handle any Unicode characters in AI output
+            essay_path = Path(output_config.get('essay_file', 'output/essay.txt'))
+            essay_path.parent.mkdir(parents=True, exist_ok=True)
+            essay_path.write_text(essay, encoding='utf-8')
+            logger.info(f"Essay saved to {essay_path}")
         
         # ==================== PHASE 3: TRAIT EXTRACTION ====================
-        logger.info("=" * 60)
-        logger.info("PHASE 3: TRAIT EXTRACTION")
-        logger.info("=" * 60)
-        
-        confidence_threshold = output_config.get('traits_confidence_threshold', 50)
-        
-        # Initialize trait extractor with comprehensive parsing
-        trait_extractor = PersonalityTraitExtractor(
-            ollama_client=ollama_client,
-            base_traits=traits_config.get('base_traits', []),
-            custom_traits=traits_config.get('custom_traits', []),
-            confidence_threshold=confidence_threshold
-        )
-        
-        # Generate traits from raw blog content and write to raw log file
-        trait_extractor.generate_traits_from_content(
-            raw_content=aggregated.raw_text,
-            tags=list(aggregated.unique_tags)
-        )
-        
-        # Extract traits from the raw log file
-        traits = trait_extractor.extract_traits()
-        
-        # Prepare traits output
-        traits_output = {
-            'traits': traits,
-            'summary_reference': 'logs/ai_engine_trait_response_raw.txt',
-            'generated_at': datetime.now().isoformat(),
-            'total_identified': len(traits),
-            'expected_total': traits_config.get('total_count', 20)
-        }
-        
-        # Save traits — explicitly UTF-8 to handle any Unicode characters in AI output
-        traits_path = Path(output_config.get('traits_file', 'output/traits.json'))
-        traits_path.parent.mkdir(parents=True, exist_ok=True)
-        traits_path.write_text(json.dumps(traits_output, indent=2, ensure_ascii=False), encoding='utf-8')
-        logger.info(f"Traits saved to {traits_path}")
+        if args.phase in ('all', 'traits'):
+            logger.info("=" * 60)
+            logger.info("PHASE 3: TRAIT EXTRACTION")
+            logger.info("=" * 60)
+            
+            confidence_threshold = output_config.get('traits_confidence_threshold', 50)
+            
+            trait_extractor = PersonalityTraitExtractor(
+                ollama_client=ollama_client,
+                base_traits=traits_config.get('base_traits', []),
+                custom_traits=traits_config.get('custom_traits', []),
+                confidence_threshold=confidence_threshold
+            )
+            
+            trait_extractor.generate_traits_from_content(
+                raw_content=aggregated.raw_text,
+                tags=list(aggregated.unique_tags)
+            )
+            
+            traits = trait_extractor.extract_traits()
+            
+            traits_output = {
+                'traits': traits,
+                'summary_reference': 'logs/ai_engine_trait_response_raw.txt',
+                'generated_at': datetime.now().isoformat(),
+                'total_identified': len(traits),
+                'expected_total': traits_config.get('total_count', 20)
+            }
+            
+            # Save traits — explicitly UTF-8 to handle any Unicode characters in AI output
+            traits_path = Path(output_config.get('traits_file', 'output/traits.json'))
+            traits_path.parent.mkdir(parents=True, exist_ok=True)
+            traits_path.write_text(json.dumps(traits_output, indent=2, ensure_ascii=False), encoding='utf-8')
+            logger.info(f"Traits saved to {traits_path}")
         
         # ==================== SUMMARY ====================
         logger.info("=" * 60)
         logger.info("PIPELINE COMPLETE")
         logger.info("=" * 60)
-        logger.info(f"Scraped {len(unique_posts)} unique posts")
-        logger.info(f"Generated {output_config.get('essay_word_count', 750)}-word essay")
-        logger.info(f"Identified {len(traits)} personality traits")
-        logger.info(f"\nOutput files:")
-        logger.info(f"  - Essay: {essay_path}")
-        logger.info(f"  - Traits: {traits_path}")
+        logger.info(f"Processed {len(unique_posts)} unique posts")
+        if essay is not None:
+            logger.info(f"Generated {output_config.get('essay_word_count', 750)}-word essay")
+        if traits:
+            logger.info(f"Identified {len(traits)} personality traits")
         
         # Archive complete session if requested
         if args.archive:
@@ -799,7 +835,7 @@ def main():
             }
             
             _archive_session_workflow(
-                scraping_session, aggregated, quiz_questions, essay, traits, analysis_metadata, config
+                scraping_session, aggregated, quiz_questions, essay or '', traits, analysis_metadata, config
             )
         
         if session_manager:
